@@ -1,13 +1,15 @@
 import { run, styled } from "uebersicht";
 
 const refreshFrequency = 500;
-const size = 80;
+const size = 85;
 const Sep = "⎖"; // Ideally, this is never a character in a song title!
 
 const initialState = { 
   loading: true, 
   size: 35,
-  appAvailable: false
+  appAvailable: false,
+  isDragging: false,
+  tempPosition: 0
 };
 
 const command = async (dispatch) => {
@@ -55,6 +57,8 @@ const refresh = async (dispatch) => {
       album,
       cover,
       appAvailable: true,
+      rawPosition: Number(position),
+      rawDuration: Number(duration / 1000),
     },
   });
 };
@@ -72,6 +76,20 @@ const commandSpotify = async (verb, dispatch) => {
   waitAndRefresh(dispatch);
 };
 
+// Function to set the position in the track
+const setTrackPosition = async (position, dispatch) => {
+  await run(
+    `osascript <<'END'
+    if application "Spotify" is running then
+      tell application "Spotify"
+        set player position to ${position}
+      end tell
+    end if
+  `
+  );
+  waitAndRefresh(dispatch);
+};
+
 // Updated Container with higher opacity and fixed position
 const Container = styled("div")`
   display: flex;
@@ -82,7 +100,7 @@ const Container = styled("div")`
   padding: 10px 15px;
   min-width: 280px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(0, 0, 0, 0.15);
   transition: opacity 0.5s linear;
   z-index: 9999;
 `;
@@ -93,16 +111,17 @@ const Song = styled("h1")`
 `;
 
 const Artist = styled("h2")`
-  font-size: 11px;
+  font-size: 12px;
   font-weight: normal;
-  margin: 0 0;
+  margin-top:6px;
+  margin-bottom:0;
 `;
 
 const Cover = styled("img")`
   border-radius: 8px;
   height: ${size}px;
   width: ${size}px;
-  margin-right: ${size * 0.2}px;
+  margin-right: ${size * 0.15}px;
 `;
 
 const Button = styled("div")`
@@ -116,6 +135,62 @@ const Button = styled("div")`
   &:active svg {
     transform: scale(0.95) translateY(1px);
   }
+`;
+
+const SliderContainer = styled("div")`
+  position: relative;
+  width: 100%;
+  margin: 4px 0;
+  height: 12px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+`;
+
+const SliderTrack = styled("div")`
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+  height: 4px;
+  flex: 1;
+  position: relative;
+  box-shadow: 0px 1px 2px rgba(0, 0, 0, 0.5);
+`;
+
+const SliderProgress = styled("div")`
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 2px;
+  transition: ${props => props.isDragging ? 'none' : 'width 0.3s linear'};
+  width: ${props => props.position * 100}%;
+`;
+
+const SliderThumb = styled("div")`
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  background: white;
+  border-radius: 50%;
+  top: 50%;
+  left: ${props => props.position * 100}%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  transition: ${props => props.isDragging ? 'none' : 'left 0.3s linear'};
+  opacity: ${props => props.isDragging || props.hover ? 1 : 0.7};
+  
+  &:hover {
+    transform: translate(-50%, -50%) scale(1.2);
+  }
+`;
+
+const TimeDisplay = styled("div")`
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.8);
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
 `;
 
 const Separator = styled("div")`
@@ -185,27 +260,140 @@ const PlayPauseButton = ({ playing, dispatch }) => {
   );
 };
 
+// Format time as mm:ss
+const formatTime = (seconds) => {
+  if (isNaN(seconds)) return "0:00";
+  const min = Math.floor(seconds / 60);
+  const sec = Math.floor(seconds % 60).toString().padStart(2, '0');
+  return `${min}:${sec}`;
+};
+
 const updateState = (event, previousState) => {
   if (event.type == "SONG_DATA") {
+    // Only update position if not currently dragging
+    if (!previousState.isDragging) {
+      return {
+        ...previousState,
+        ...event.data,
+        dispatch: event.dispatch,
+        loading: false,
+      };
+    } else {
+      // Keep the user's dragging position
+      return {
+        ...previousState,
+        ...event.data,
+        position: previousState.tempPosition,
+        dispatch: event.dispatch,
+        loading: false,
+      };
+    }
+  } else if (event.type == "DRAG_START") {
     return {
       ...previousState,
-      ...event.data,
-      dispatch: event.dispatch,
-      loading: false,
+      isDragging: true
     };
-  } else return previousState;
+  } else if (event.type == "DRAG_MOVE") {
+    return {
+      ...previousState,
+      tempPosition: event.position,
+      position: event.position
+    };
+  } else if (event.type == "DRAG_END") {
+    // Calculate the actual time to set
+    const newPosition = previousState.rawDuration * event.position;
+    
+    // Set the position in Spotify
+    setTrackPosition(newPosition, previousState.dispatch);
+    
+    return {
+      ...previousState,
+      isDragging: false,
+      position: event.position
+    };
+  }
+  
+  return previousState;
 };
 
 const render = (data) => {
   if (data.error || data.loading) return <div></div>;
-  const { song, artist, album, cover, playing, position, appAvailable } = data;
+  const { song, artist, album, cover, playing, position, appAvailable, isDragging, rawPosition, rawDuration } = data;
+  
+  // Handler for slider interaction
+  const handleSliderInteraction = (e) => {
+    const slider = e.currentTarget;
+    const rect = slider.getBoundingClientRect();
+    const offsetX = e.clientX - rect.left;
+    const width = rect.width;
+    let newPosition = offsetX / width;
+    
+    // Clamp between 0 and 1
+    newPosition = Math.max(0, Math.min(1, newPosition));
+    
+    if (e.type === 'mousedown') {
+      // Start dragging
+      data.dispatch({
+        type: "DRAG_START"
+      });
+      
+      // Add listeners for drag and end events
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+      
+      // Update position
+      data.dispatch({
+        type: "DRAG_MOVE",
+        position: newPosition
+      });
+    }
+    
+    function handleMouseMove(e) {
+      const offsetX = e.clientX - rect.left;
+      let newPosition = offsetX / width;
+      newPosition = Math.max(0, Math.min(1, newPosition));
+      
+      data.dispatch({
+        type: "DRAG_MOVE",
+        position: newPosition
+      });
+    }
+    
+    function handleMouseUp(e) {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      
+      const offsetX = e.clientX - rect.left;
+      let finalPosition = offsetX / width;
+      finalPosition = Math.max(0, Math.min(1, finalPosition));
+      
+      data.dispatch({
+        type: "DRAG_END",
+        position: finalPosition
+      });
+    }
+  };
   
   return (
     <Container style={{ opacity: !appAvailable ? 0 : playing ? 1 : 0.3 }}>
       <Cover src={cover} size={size} />
-      <div>
+      <div style={{ width: "100%" }}>
         <Song>{song}</Song>
-        <Separator position={position} />
+        
+        {/* New slider component */}
+        <SliderContainer onMouseDown={handleSliderInteraction}>
+          <SliderTrack>
+            <SliderProgress position={position} isDragging={isDragging} />
+          </SliderTrack>
+          <SliderThumb position={position} isDragging={isDragging} />
+        </SliderContainer>
+        
+        {/* Time display */}
+        <TimeDisplay>
+          <span>{formatTime(rawPosition)}</span>
+          <span>{formatTime(rawDuration)}</span>
+        </TimeDisplay>
+        
         <Artist>
           {artist}
           {artist && album ? " – " : ""}
@@ -228,8 +416,8 @@ const className = `
   font-family: -apple-system, sans-serif;
   text-shadow: 0px 1px 4px #000000;
   color: #fff;
-  bottom: 10px;
-  left: 10px;
+  bottom: 20px;
+  left: 20px;
   max-width: 20em;
   fill: #fff;
   position: fixed;
